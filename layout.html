@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>DSL 數位邏輯動態電路圖模擬器</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121214;
+            color: #e0e0e0;
+            padding: 20px;
+            margin: 0;
+        }
+        .container {
+            max-width: 1024px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        h2 { color: #00ffcc; margin: 0; text-shadow: 0 0 10px rgba(0,255,204,0.3); }
+        .panel {
+            background-color: #1a1a24;
+            border: 1px solid #2d2d3d;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+        button {
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        #btn-toggle { background-color: #00ffcc; color: #121214; }
+        #btn-toggle:hover { background-color: #00cc99; }
+        #btn-delta { background-color: #ff3366; color: white; }
+        #btn-delta:hover { background-color: #cc2255; }
+        canvas {
+            background-color: #0a0a0f;
+            border: 1px solid #1f1f2e;
+            border-radius: 6px;
+            display: block;
+            width: 100%;
+            box-shadow: inset 0 0 20px rgba(0,0,0,0.8);
+        }
+        .info-bar {
+            font-family: monospace;
+            display: flex;
+            justify-content: space-between;
+            background: #0f0f15;
+            padding: 10px 15px;
+            border-radius: 4px;
+            border: 1px solid #222;
+            font-size: 13px;
+        }
+        .info-bar span { color: #00ffcc; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>⚡ DSL 數位邏輯動態電路圖模擬器</h2>
+    
+    <div class="panel controls">
+        <button id="btn-toggle">啟動主時脈 [CLK]</button>
+        <button id="btn-delta">外部非同步脈衝 [DELTA]</button>
+        <div class="info-bar" style="flex-grow: 1; margin-left: 20px;">
+            <div>時脈計數: <span id="lbl-clk">0</span></div>
+            <div>目前匯流排 (Bus): <span id="lbl-bus">0000 (0)</span></div>
+            <div>格雷碼輸出 (Gray): <span id="lbl-gray">0000 (0)</span></div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <canvas id="circuitCanvas" width="960" height="480"></canvas>
+    </div>
+</div>
+
+<script>
+    // --- 核心硬體與模擬狀態 ---
+    let isRunning = false;
+    let clockTicks = 0;
+    let timerInterval = null;
+
+    const state = {
+        clkSignal: 0,
+        deltaSignal: 0,
+        triggerOut: 0,
+        fifoQueue: [0, 0, 0],
+        feedbackFreq: 0,
+        binaryValue: 0,
+        grayValue: 0
+    };
+
+    // --- 邏輯函數 ---
+    function binaryToGray(num) {
+        return num ^ (num >> 1);
+    }
+
+    // --- 核心模擬步進 (Simulation Tick) ---
+    function tick() {
+        clockTicks++;
+        state.clkSignal = clockTicks % 2; // 方波交替 0 和 1
+
+        // 模擬內部計時器觸發 (每當主時脈正緣且 tick 是 4 的倍數)
+        const internalTrigger = (state.clkSignal === 1 && clockTicks % 4 === 0);
+
+        if (internalTrigger || state.deltaSignal === 1) {
+            state.triggerOut = 1;
+            
+            // 模擬資料推入 FIFO (bubble_transport)
+            let newVal = state.deltaSignal === 1 ? 15 : (clockTicks % 16);
+            state.fifoQueue.push(newVal);
+            if(state.fifoQueue.length > 3) state.fifoQueue.shift();
+
+            // 類比拉普拉斯位移反饋 (Laplace_shift)
+            state.feedbackFreq = (state.fifoQueue.reduce((a,b)=>a+b, 0) * 3) % 16;
+            state.binaryValue = state.feedbackFreq;
+            
+            // 格雷碼轉換 (slit_grey_codes)
+            state.grayValue = binaryToGray(state.binaryValue);
+
+            // 消費掉非同步脈衝
+            state.deltaSignal = 0;
+        } else {
+            if (state.clkSignal === 1) {
+                state.triggerOut = 0; // 清除觸發狀態
+            }
+        }
+
+        updateUI();
+        drawCircuit();
+    }
+
+    function updateUI() {
+        document.getElementById('lbl-clk').innerText = clockTicks;
+        document.getElementById('lbl-bus').innerText = state.binaryValue.toString(2).padStart(4, '0') + ` (${state.binaryValue})`;
+        document.getElementById('lbl-gray').innerText = state.grayValue.toString(2).padStart(4, '0') + ` (${state.grayValue})`;
+    }
+
+    // --- Canvas 電路圖繪製引擎 ---
+    const canvas = document.getElementById('circuitCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // 輔助繪圖函數：導線
+    function drawWire(points, isHigh) {
+        ctx.strokeStyle = isHigh ? "#00ffcc" : "#334444";
+        ctx.lineWidth = isHigh ? 3 : 2;
+        ctx.shadowBlur = isHigh ? 8 : 0;
+        ctx.shadowColor = "#00ffcc";
+        
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        for(let i=1; i<points.length; i++) {
+            ctx.lineTo(points[i][0], points[i][1]);
+        }
+        ctx.stroke();
+        ctx.shadowBlur = 0; // 重置發光
+    }
+
+    // 輔助繪圖函數：晶片/邏輯方塊
+    function drawBlock(x, y, w, h, title, subtext = "") {
+        // 外框
+        ctx.fillStyle = "#151522";
+        ctx.strokeStyle = "#444466";
+        ctx.lineWidth = 2;
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeRect(x, y, w, h);
+
+        // 頂部裝飾條
+        ctx.fillStyle = "#222235";
+        ctx.fillRect(x, y, w, 24);
+        ctx.strokeRect(x, y, w, 24);
+
+        // 文字
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 11px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(title, x + w/2, y + 16);
+
+        if (subtext) {
+            ctx.fillStyle = "#8888aa";
+            ctx.font = "10px monospace";
+            ctx.fillText(subtext, x + w/2, y + h - 10);
+        }
+    }
+
+    // 主繪圖邏輯
+    function drawCircuit() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // === 1. 繪製導線 (Wires) ===
+        // CLK 到 同步計時器
+        drawWire([[60, 100], [100, 100]], state.clkSignal);
+        // DELTA 到 觸發邏輯
+        drawWire([[60, 180], [100, 180]], state.deltaSignal);
+        // 計時器輸出 與 DELTA 匯流到觸發器
+        drawWire([[200, 100], [220, 100], [220, 130], [240, 130]], clockTicks % 4 === 0 && state.clkSignal === 1);
+        drawWire([[200, 180], [220, 180], [220, 150], [240, 150]], state.deltaSignal);
+        
+        // 觸發器輸出 到 FIFO 佇列 (Linkage Trigger)
+        drawWire([[340, 140], [370, 140]], state.triggerOut);
+
+        // FIFO 到 位移暫存器
+        drawWire([[470, 140], [500, 140]], state.triggerOut);
+
+        // 位移暫存器到格雷碼轉換器 (4-Bit Bus)
+        for(let i=0; i<4; i++) {
+            let bitHigh = (state.binaryValue >> i) & 1;
+            drawWire([[600, 110 + i*20], [640, 110 + i*20]], bitHigh);
+        }
+
+        // 格雷碼轉換器到 路由閘 (4-Bit Gray Bus)
+        for(let i=0; i<4; i++) {
+            let bitHigh = (state.grayValue >> i) & 1;
+            drawWire([[740, 110 + i*20], [780, 110 + i*20]], bitHigh);
+        }
+
+        // 路由閘到 點陣輸出
+        for(let i=0; i<4; i++) {
+            let bitHigh = (state.grayValue >> i) & 1;
+            drawWire([[860, 140 + i*25], [890, 140 + i*25]], bitHigh);
+        }
+
+
+        // === 2. 繪製邏輯功能方塊 (Components) ===
+        
+        // 輸入源標籤
+        ctx.fillStyle = "#888";
+        ctx.font = "12px monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(`CLK PADS`, 50, 104);
+        ctx.fillText(`EXT DELTA`, 50, 184);
+
+        // simul_timer
+        drawBlock(100, 70, 100, 60, "simul_timer", `DIV 4`);
+        // cloud_verified_ring
+        drawBlock(100, 150, 100, 60, "cloud_ring", "Δ Pulse");
+        
+        // Linkage Trigger OR-Gate 模擬
+        drawBlock(240, 110, 100, 60, "Trigger Logic", "OR GATE");
+
+        // bubble_transport (FIFO)
+        drawBlock(370, 110, 100, 60, "FIFO Queue", `[${state.fifoQueue.toString()}]`);
+
+        // Laplace_shift & tube_segment_window
+        drawBlock(500, 90, 100, 100, "Laplace Shift", `Freq: ${state.feedbackFreq*10}Hz`);
+
+        // slit_grey_codes
+        drawBlock(640, 90, 100, 100, "Gray Encoder", "Bin -> Gray");
+
+        // flex_tangible_sensor_router_gates
+        drawBlock(780, 90, 80, 100, "Router Gates", "MUX Array");
+
+        // scroller_heap_dot_matrix (點陣輸出外框)
+        ctx.fillStyle = "#050508";
+        ctx.strokeStyle = "#ff3366";
+        ctx.fillRect(890, 100, 40, 140);
+        ctx.strokeRect(890, 100, 40, 140);
+        
+        ctx.fillStyle = "#ff3366";
+        ctx.font = "9px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("MATRIX", 910, 115);
+
+        // 繪製 LED 燈號
+        for (let i = 0; i < 4; i++) {
+            let isLit = (state.grayValue >> i) & 1;
+            ctx.fillStyle = isLit ? "#00ffcc" : "#222530";
+            if (isLit) {
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = "#00ffcc";
+            }
+            ctx.beginPath();
+            ctx.arc(910, 140 + i * 25, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    // --- 控制監聽器 ---
+    document.getElementById('btn-toggle').addEventListener('click', function() {
+        isRunning = !isRunning;
+        if (isRunning) {
+            this.innerText = "暫停時脈 [PAUSE]";
+            this.style.backgroundColor = "#ffcc00";
+            // 以 250ms 作為一個硬體週期（Tick）方便肉眼debug導線顏色變更
+            timerInterval = setInterval(tick, 250);
+        } else {
+            this.innerText = "啟動主時脈 [RUN]";
+            this.style.backgroundColor = "#00ffcc";
+            clearInterval(timerInterval);
+        }
+    });
+
+    document.getElementById('btn-delta').addEventListener('click', function() {
+        state.deltaSignal = 1;
+        drawCircuit(); // 即使暫停也立刻重繪導線顏色
+    });
+
+    // 初始化畫布
+    drawCircuit();
+</script>
+
+</body>
+</html>
